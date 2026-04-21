@@ -1,10 +1,3 @@
 streamlit
 pandas
 plotly
-openai-whisper
-numpy
-librosa
-streamlit-extras
-openpyxl
-xlsxwriter
-streamlit-mic-recorder
