@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 دفتر الحسابات - نسخة ويب احترافية كاملة
-قاعدة بيانات SQLite محلية - لا تحتاج Supabase
+قاعدة بيانات SQLite محلية
 يدعم الإدخال الصوتي للهجة اليمنية
 العملة: ريال يمني (YER)
 """
@@ -20,6 +20,7 @@ import sqlite3
 import uuid
 from streamlit_extras.colored_header import colored_header
 from streamlit_extras.stylable_container import stylable_container
+from streamlit_mic_recorder import mic_recorder
 
 # ---------- إعدادات الصفحة ----------
 st.set_page_config(
@@ -36,11 +37,8 @@ DB_FILE = "database.db"
 
 # ---------- دوال قاعدة البيانات SQLite ----------
 def init_db():
-    """إنشاء الجداول إذا لم تكن موجودة."""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    
-    # جدول الأشخاص
     c.execute('''
         CREATE TABLE IF NOT EXISTS persons (
             id TEXT PRIMARY KEY,
@@ -48,8 +46,6 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    
-    # جدول المعاملات
     c.execute('''
         CREATE TABLE IF NOT EXISTS transactions (
             id TEXT PRIMARY KEY,
@@ -62,19 +58,16 @@ def init_db():
             FOREIGN KEY (person_id) REFERENCES persons (id) ON DELETE CASCADE
         )
     ''')
-    
     conn.commit()
     conn.close()
 
 def get_persons():
-    """جلب قائمة الأشخاص."""
     conn = sqlite3.connect(DB_FILE)
     df = pd.read_sql_query("SELECT * FROM persons ORDER BY name", conn)
     conn.close()
     return df.to_dict('records')
 
 def get_transactions():
-    """جلب جميع المعاملات مع اسم الشخص."""
     conn = sqlite3.connect(DB_FILE)
     df = pd.read_sql_query('''
         SELECT t.*, p.name as person_name 
@@ -86,7 +79,6 @@ def get_transactions():
     return df.to_dict('records')
 
 def add_person(name: str):
-    """إضافة شخص جديد."""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute(
@@ -98,7 +90,6 @@ def add_person(name: str):
     st.cache_data.clear()
 
 def add_transaction(person_id: str, amount: float, trans_type: str, notes: str, trans_date: datetime):
-    """إضافة معاملة جديدة."""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute(
@@ -109,7 +100,6 @@ def add_transaction(person_id: str, amount: float, trans_type: str, notes: str, 
     conn.close()
     st.cache_data.clear()
 
-# تهيئة قاعدة البيانات عند بدء التشغيل
 init_db()
 
 # ---------- دوال مساعدة للتصدير ----------
@@ -182,7 +172,7 @@ else:
 @st.cache_resource
 def load_whisper_model():
     try:
-        model = whisper.load_model("base")
+        model = whisper.load_model("tiny")  # استخدام tiny لسرعة أكبر
         return model
     except Exception as e:
         st.error(f"فشل تحميل نموذج Whisper: {e}")
@@ -324,7 +314,7 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # ---------- الإدخال الصوتي ----------
+    # ---------- الإدخال الصوتي (باستخدام mic_recorder) ----------
     with stylable_container(
         key="voice_container",
         css_styles="""
@@ -337,20 +327,31 @@ with st.sidebar:
             """,
     ):
         st.header("🎤 الإدخال الصوتي")
-        st.caption("تحدث بالعربية (أو اللهجة اليمنية) لتسجيل معاملة تلقائياً.")
+        st.caption("اضغط على الميكروفون وتحدث، ثم اضغط مرة أخرى للإيقاف")
+        
         model = load_whisper_model()
-        audio_file = st.audio_input("🎙️ اضغط للتسجيل...", label_visibility="visible")
-
-        if audio_file is not None:
-            st.audio(audio_file, format="audio/wav")
+        
+        audio_data = mic_recorder(
+            start_prompt="🎙️ بدء التسجيل",
+            stop_prompt="⏹️ إيقاف التسجيل",
+            just_once=False,
+            use_container_width=True,
+            format="wav",
+            key="voice_recorder"
+        )
+        
+        if audio_data is not None:
+            st.audio(audio_data['bytes'], format='audio/wav')
+            
             if st.button("🔄 تحليل الصوت", type="secondary", use_container_width=True):
                 if model is None:
                     st.error("نموذج Whisper غير جاهز.")
                 else:
                     with st.spinner("جاري تحويل الصوت إلى نص..."):
                         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
-                            tmp_file.write(audio_file.getvalue())
+                            tmp_file.write(audio_data['bytes'])
                             tmp_file_path = tmp_file.name
+                        
                         try:
                             result = model.transcribe(tmp_file_path, language="ar", task="transcribe")
                             transcribed_text = result["text"]
@@ -379,6 +380,7 @@ with st.sidebar:
                                     "📌 نوع المعاملة", ["دين لك", "دين عليك"], index=type_index
                                 )
                                 notes_voice = st.text_area("📝 ملاحظات", value=transcribed_text[:100])
+                                
                                 if st.button("💾 حفظ المعاملة الصوتية", type="primary", use_container_width=True):
                                     if selected_person_id_voice and amount_voice > 0:
                                         add_transaction(
