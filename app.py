@@ -5,6 +5,9 @@ from datetime import datetime
 import os
 import json
 import uuid
+import speech_recognition as sr
+from st_audiorec import st_audiorec
+import tempfile
 
 # ---------- إعداد الصفحة ----------
 st.set_page_config(page_title="دفتر الحسابات", page_icon="📒", layout="wide")
@@ -64,132 +67,57 @@ if transactions:
 else:
     balances = pd.DataFrame(columns=["person_name", "الرصيد"])
 
-# ---------- كود JavaScript للتعرف على الصوت (Web Speech API) ----------
-voice_script = """
-<script>
-let recognition;
-let isRecording = false;
+# ---------- دالة تحويل الصوت إلى نص ----------
+def transcribe_audio(audio_bytes):
+    """تحويل الصوت (بايتات) إلى نص عربي باستخدام Google Speech Recognition."""
+    r = sr.Recognizer()
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+        tmp.write(audio_bytes)
+        tmp_path = tmp.name
+    try:
+        with sr.AudioFile(tmp_path) as source:
+            audio_data = r.record(source)
+            text = r.recognize_google(audio_data, language="ar-YE")  # عربي يمني
+            return text
+    except sr.UnknownValueError:
+        return None
+    except Exception as e:
+        return f"خطأ: {e}"
+    finally:
+        os.unlink(tmp_path)
 
-function startRecording() {
-    if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
-        alert('متصفحك لا يدعم التعرف على الصوت. الرجاء استخدام Chrome أو Edge.');
-        return;
-    }
-    
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    recognition = new SpeechRecognition();
-    recognition.lang = 'ar-YE';  // العربية (اللهجة اليمنية)
-    recognition.interimResults = false;
-    recognition.continuous = false;
-    
-    recognition.onstart = function() {
-        isRecording = true;
-        document.getElementById('voice-status').innerText = '🎙️ جاري الاستماع... تحدث الآن';
-        document.getElementById('start-btn').disabled = true;
-        document.getElementById('stop-btn').disabled = false;
-    };
-    
-    recognition.onresult = function(event) {
-        const transcript = event.results[0][0].transcript;
-        document.getElementById('voice-result').value = transcript;
-        document.getElementById('voice-status').innerText = '✅ تم الاستماع. اضغط "تحليل النص"';
-        
-        // إرسال النص إلى Streamlit
-        window.parent.postMessage({
-            type: 'streamlit:setComponentValue',
-            value: transcript
-        }, '*');
-    };
-    
-    recognition.onerror = function(event) {
-        document.getElementById('voice-status').innerText = '❌ خطأ: ' + event.error;
-        resetButtons();
-    };
-    
-    recognition.onend = function() {
-        resetButtons();
-    };
-    
-    recognition.start();
-}
-
-function stopRecording() {
-    if (recognition) {
-        recognition.stop();
-        document.getElementById('voice-status').innerText = '⏹️ تم الإيقاف';
-    }
-    resetButtons();
-}
-
-function resetButtons() {
-    isRecording = false;
-    document.getElementById('start-btn').disabled = false;
-    document.getElementById('stop-btn').disabled = true;
-}
-
-// إرسال النص إلى Streamlit عند تحميل الصفحة
-document.addEventListener('DOMContentLoaded', function() {
-    const resultField = document.getElementById('voice-result');
-    resultField.addEventListener('change', function() {
-        window.parent.postMessage({
-            type: 'streamlit:setComponentValue',
-            value: resultField.value
-        }, '*');
-    });
-});
-</script>
-
-<div style="background-color: #e6f3ff; padding: 15px; border-radius: 10px; border-left: 5px solid #1f77b4;">
-    <h4>🎤 الإدخال الصوتي</h4>
-    <p style="font-size: 0.9rem;">تحدث بالعربية أو اللهجة اليمنية</p>
-    <button id="start-btn" onclick="startRecording()" style="padding: 8px 16px; background-color: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer; margin-right: 10px;">🎙️ بدء التسجيل</button>
-    <button id="stop-btn" onclick="stopRecording()" disabled style="padding: 8px 16px; background-color: #f44336; color: white; border: none; border-radius: 5px; cursor: pointer;">⏹️ إيقاف</button>
-    <p id="voice-status" style="margin-top: 10px; font-weight: bold;"></p>
-    <input type="hidden" id="voice-result">
-</div>
-"""
-
-# ---------- دالة تحليل النص المستخرج ----------
 def parse_voice_command(text: str, persons_list: list):
-    """تحليل النص العربي لاستخراج اسم الشخص والمبلغ والنوع."""
+    """تحليل النص العربي لاستخراج بيانات المعاملة."""
     import re
-    
     text = text.strip()
-    original_text = text
-    
-    # تنظيف النص
+    original = text
     text = re.sub(r'[،,\.\?\!]', ' ', text)
     text = re.sub(r'\s+', ' ', text)
-    
-    # كلمات دالة على الأرقام
+
+    # قاموس الأرقام
     number_words = {
-        "صفر": 0, "واحد": 1, "اثنين": 2, "ثلاثة": 3, "اربعة": 4, "أربعة": 4,
-        "خمسة": 5, "ستة": 6, "سبعة": 7, "ثمانية": 8, "تسعة": 9, "عشرة": 10,
-        "عشرين": 20, "ثلاثين": 30, "اربعين": 40, "خمسين": 50,
-        "ستين": 60, "سبعين": 70, "ثمانين": 80, "تسعين": 90,
-        "مية": 100, "مئة": 100, "ميه": 100, "ميتين": 200, "مئتين": 200,
-        "ثلاثميه": 300, "اربعميه": 400, "خمسميه": 500,
-        "ستميه": 600, "سبعميه": 700, "ثمانميه": 800, "تسعميه": 900,
-        "الف": 1000, "ألف": 1000, "الفين": 2000, "ألفين": 2000,
-        "ريال": 1, "ريالات": 1
+        "صفر":0,"واحد":1,"اثنين":2,"ثلاثة":3,"اربعة":4,"خمسة":5,"ستة":6,"سبعة":7,
+        "ثمانية":8,"تسعة":9,"عشرة":10,"عشرين":20,"ثلاثين":30,"اربعين":40,"خمسين":50,
+        "ستين":60,"سبعين":70,"ثمانين":80,"تسعين":90,"مية":100,"مئة":100,"ميه":100,
+        "ميتين":200,"ثلاثميه":300,"اربعميه":400,"خمسميه":500,"ستميه":600,"سبعميه":700,
+        "ثمانميه":800,"تسعميه":900,"الف":1000,"ألف":1000,"الفين":2000,"ريال":1
     }
-    
-    # تحديد نوع المعاملة
+
+    # نوع المعاملة
     text_lower = text.lower()
     if any(kw in text_lower for kw in ["علي", "عليه", "دين علي", "مدين", "له"]):
         trans_type = "دين عليك"
-    elif any(kw in text_lower for kw in ["لي", "دين لي", "دائن", "عندي", "لصالح"]):
+    elif any(kw in text_lower for kw in ["لي", "دين لي", "دائن", "عندي"]):
         trans_type = "دين لك"
     else:
         trans_type = "دين عليك" if "دين" in text_lower else "دين لك"
-    
+
     # استخراج المبلغ
     amount = 0.0
     arabic_digits = {'٠':'0','١':'1','٢':'2','٣':'3','٤':'4','٥':'5','٦':'6','٧':'7','٨':'8','٩':'9'}
     text_clean = text
     for a, e in arabic_digits.items():
         text_clean = text_clean.replace(a, e)
-    
     match = re.search(r'(\d+(?:\.\d+)?)', text_clean)
     if match:
         amount = float(match.group(1))
@@ -197,54 +125,47 @@ def parse_voice_command(text: str, persons_list: list):
         words = text_clean.split()
         total = 0
         current = 0
-        for word in words:
-            if word in number_words:
-                val = number_words[word]
+        for w in words:
+            if w in number_words:
+                val = number_words[w]
                 if val >= 1000:
-                    current = current if current != 0 else 1
+                    current = current or 1
                     total += current * val
                     current = 0
                 elif val >= 100:
-                    current = current if current != 0 else 1
+                    current = current or 1
                     total += current * val
                     current = 0
                 else:
                     current += val
         total += current
         amount = float(total)
-    
-    # استخراج اسم الشخص
-    keywords_to_remove = ["دين", "علي", "لي", "بمبلغ", "أضف", "مبلغ", "بـ", "قدره", "قدرها",
-                          "ريال", "ريالات", "دولار", "دينار", "عليه", "مدين", "دائن", "عندي",
-                          "لصالح", "من", "إلى", "عن", "سجل", "ضيف", "حط", "خلي", "عند"]
-    for kw in keywords_to_remove:
+
+    # استخراج الاسم
+    keywords = ["دين","علي","لي","بمبلغ","أضف","مبلغ","بـ","قدره","ريال","ريالات","عليه","مدين","دائن","عندي"]
+    for kw in keywords:
         text_clean = re.sub(rf'\b{kw}\b', '', text_clean, flags=re.IGNORECASE)
     text_clean = re.sub(r'\d+', '', text_clean)
-    name_candidate = re.sub(r'\s+', ' ', text_clean).strip()
-    if not name_candidate:
-        name_candidate = original_text[:20]
-    
-    # مطابقة الاسم مع الأشخاص الموجودين
+    name_candidate = re.sub(r'\s+', ' ', text_clean).strip() or original[:20]
+
     matched_person = None
     for p in persons_list:
-        p_name = p["name"].strip()
-        if (p_name in name_candidate) or (name_candidate in p_name) or (p_name.lower() == name_candidate.lower()):
+        if p["name"].strip() in name_candidate or name_candidate in p["name"]:
             matched_person = p
             break
-    
+
     return {
         "trans_type": trans_type,
         "amount": amount,
-        "person_name": name_candidate if not matched_person else matched_person["name"],
+        "person_name": matched_person["name"] if matched_person else name_candidate,
         "matched_person": matched_person,
-        "raw_text": original_text
+        "raw_text": original
     }
 
 # ---------- الشريط الجانبي ----------
 with st.sidebar:
     st.header("➕ إضافة معاملة")
-    
-    # اختيار الشخص
+
     if persons:
         selected_person_name = st.selectbox("👤 اختر الشخص", list(person_options.keys()))
         selected_person_id = person_options[selected_person_name]
@@ -252,7 +173,6 @@ with st.sidebar:
         st.warning("لا يوجد أشخاص. أضف شخصاً:")
         selected_person_id = None
 
-    # إضافة شخص جديد
     with st.expander("➕ إضافة شخص جديد"):
         new_name = st.text_input("الاسم")
         if st.button("إضافة") and new_name:
@@ -260,7 +180,6 @@ with st.sidebar:
             st.success(f"تمت إضافة {new_name}")
             st.rerun()
 
-    # إدخال يدوي
     amount = st.number_input("💰 المبلغ (﷼)", min_value=0.0, step=100.0, format="%.2f")
     trans_type = st.selectbox("📌 النوع", ["دين لك", "دين عليك"])
     notes = st.text_input("📝 ملاحظات")
@@ -276,53 +195,45 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # ---------- قسم الإدخال الصوتي ----------
-    st.components.v1.html(voice_script, height=200)
-    
-    # استقبال النص من JavaScript
-    voice_text = st.session_state.get("voice_text", "")
-    
-    # زر تحليل النص
-    if st.button("🔄 تحليل النص الصوتي", use_container_width=True):
-        if voice_text:
-            st.session_state["voice_text"] = voice_text
-        else:
-            st.warning("الرجاء تسجيل صوت أولاً")
-    
-    # معالجة النص الصوتي
-    if "voice_text" in st.session_state and st.session_state["voice_text"]:
-        transcribed = st.session_state["voice_text"]
-        st.success(f"**النص:** {transcribed}")
-        
-        parsed = parse_voice_command(transcribed, persons)
-        
-        with st.expander("✅ تأكيد البيانات", expanded=True):
-            # اختيار الشخص
-            person_names = list(person_options.keys())
-            default_idx = 0
-            if parsed['matched_person']:
-                default_idx = person_names.index(parsed['matched_person']['name'])
-            selected_person_name_v = st.selectbox("👤 تأكيد الشخص", person_names, index=default_idx, key="voice_person")
-            selected_person_id_v = person_options[selected_person_name_v]
-            
-            # المبلغ
-            amount_v = st.number_input("💰 المبلغ (﷼)", value=float(parsed['amount']), min_value=0.0, step=100.0, key="voice_amount")
-            
-            # النوع
-            type_idx = 0 if parsed['trans_type'] == "دين لك" else 1
-            trans_type_v = st.selectbox("📌 النوع", ["دين لك", "دين عليك"], index=type_idx, key="voice_type")
-            
-            # ملاحظات
-            notes_v = st.text_area("📝 ملاحظات", value=transcribed[:100], key="voice_notes")
-            
-            if st.button("💾 حفظ المعاملة الصوتية", type="primary", use_container_width=True):
-                if selected_person_id_v and amount_v > 0:
-                    add_transaction(selected_person_id_v, amount_v, trans_type_v, notes_v, datetime.today())
-                    st.success("تم الحفظ بنجاح!")
-                    st.session_state["voice_text"] = ""
-                    st.rerun()
+    # ---------- ميزة التسجيل الصوتي باستخدام st_audiorec ----------
+    st.subheader("🎤 الإدخال الصوتي")
+    st.caption("اضغط على الميكروفون للتسجيل (يحتاج إنترنت مؤقت للتحليل)")
+
+    wav_audio_data = st_audiorec()
+
+    if wav_audio_data is not None:
+        st.audio(wav_audio_data, format='audio/wav')
+
+        if st.button("🔄 تحليل الصوت", type="secondary", use_container_width=True):
+            with st.spinner("جاري تحويل الصوت إلى نص..."):
+                transcribed = transcribe_audio(wav_audio_data)
+                if transcribed is None:
+                    st.error("لم نتمكن من فهم الصوت. حاول مرة أخرى بوضوح.")
+                elif transcribed.startswith("خطأ"):
+                    st.error(transcribed)
                 else:
-                    st.error("الرجاء التأكد من البيانات")
+                    st.success(f"**النص:** {transcribed}")
+                    parsed = parse_voice_command(transcribed, persons)
+
+                    with st.expander("✅ تأكيد البيانات", expanded=True):
+                        # قائمة الأشخاص
+                        names = list(person_options.keys())
+                        idx = names.index(parsed["matched_person"]["name"]) if parsed["matched_person"] else 0
+                        sel_name = st.selectbox("👤 الشخص", names, index=idx, key="v_person")
+                        sel_id = person_options[sel_name]
+
+                        amt = st.number_input("💰 المبلغ", value=float(parsed['amount']), min_value=0.0, step=100.0, key="v_amount")
+                        typ = st.selectbox("📌 النوع", ["دين لك", "دين عليك"],
+                                          index=0 if parsed['trans_type']=="دين لك" else 1, key="v_type")
+                        note = st.text_area("📝 ملاحظات", value=transcribed[:100], key="v_notes")
+
+                        if st.button("💾 حفظ المعاملة الصوتية", type="primary", use_container_width=True):
+                            if sel_id and amt > 0:
+                                add_transaction(sel_id, amt, typ, note, datetime.today())
+                                st.success("تم الحفظ!")
+                                st.rerun()
+                            else:
+                                st.error("تأكد من البيانات")
 
 # ---------- المحتوى الرئيسي ----------
 tab1, tab2 = st.tabs(["📊 الأرصدة", "📋 كشف الحسابات"])
@@ -340,12 +251,12 @@ with tab1:
         fig = px.bar(balances, x="person_name", y="الرصيد", color="الرصيد",
                      color_continuous_scale=["red", "lightgray", "green"])
         st.plotly_chart(fig, use_container_width=True)
-        
-        total_credit = balances[balances["الرصيد"] > 0]["الرصيد"].sum()
-        total_debit = abs(balances[balances["الرصيد"] < 0]["الرصيد"].sum())
+
+        credit = balances[balances["الرصيد"] > 0]["الرصيد"].sum()
+        debit = abs(balances[balances["الرصيد"] < 0]["الرصيد"].sum())
         c1, c2 = st.columns(2)
-        c1.metric("💰 الديون لك", f"{total_credit:,.2f} ﷼")
-        c2.metric("💸 الديون عليك", f"{total_debit:,.2f} ﷼")
+        c1.metric("💰 الديون لك", f"{credit:,.2f} ﷼")
+        c2.metric("💸 الديون عليك", f"{debit:,.2f} ﷼")
     else:
         st.info("لا توجد معاملات بعد")
 
