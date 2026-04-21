@@ -7,3 +7,4 @@ librosa
 streamlit-extras
 openpyxl
 xlsxwriter
+streamlit-mic-recorder
