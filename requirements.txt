@@ -1,5 +1,3 @@
 streamlit
-pandas
-plotly
-audio-recorder-streamlit
-SpeechRecognition
+requests
+pillow
